@@ -281,9 +281,12 @@ def run(
     stride, names, pt = model.stride, model.names, model.pt
     imgsz  = check_img_size(imgsz, s=stride)
 
-    half &= pt and device.type != 'cpu'
+    # >>> BẢN VÁ 1: SỬA LỖI HALF PRECISION CHO TENSORRT <<<
     if pt:
+        half &= device.type != 'cpu'
         model.model.half() if half else model.model.float()
+    else:
+        pass # Cho phép TensorRT dùng cờ --half của user
 
     # ── Dataset — đọc y hệt val.py, prefetch multi-worker ────
     dataset = LoadDualStream(source, source2,
@@ -307,14 +310,6 @@ def run(
     vid_path_saved = None
     save_path      = str(save_dir / 'output.mp4')
 
-    # ── Display thread — tách riêng khỏi inference ────────────
-    # stop_event   = Event()
-    # display_queue = Queue(maxsize=4)   # buffer nhỏ, tránh dùng RAM quá nhiều
-    # if view_img:
-    #     disp_thread = Thread(target=display_worker,
-    #                          args=(display_queue, stop_event, WINDOW),
-    #                          daemon=True)
-    #     disp_thread.start()
     stop_infer = False
     # ══════════════════════════════════════════════════════════
     #  Batch loop — xử lý N frame song song trên GPU như val.py
@@ -327,8 +322,14 @@ def run(
 
         # 1. Cả batch → tensor BCHW ───────────────────────────
         t1 = time_sync()
-        im  = torch.from_numpy(img_rgb_batch ).to(device)
-        im2 = torch.from_numpy(img_mask_batch).to(device)
+        
+        # >>> BẢN VÁ 2: SỬA LỖI NAN BẰNG CONTIGUOUS ARRAY <<<
+        im_np  = np.ascontiguousarray(img_rgb_batch)
+        im2_np = np.ascontiguousarray(img_mask_batch)
+
+        im  = torch.from_numpy(im_np).to(device)
+        im2 = torch.from_numpy(im2_np).to(device)
+        
         im  = im.half()  if half else im.float();  im  /= 255.0
         im2 = im2.half() if half else im2.float(); im2 /= 255.0
         t2 = time_sync()
