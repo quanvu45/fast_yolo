@@ -1,0 +1,12 @@
+# Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
+train: /home/xxx/Documents/YOLOMG/dataset/NPS3/train.txt
+train2: /home/xxx/Documents/YOLOMG/dataset/NPS3/train2.txt
+val: /home/xxx/Documents/YOLOMG/dataset/NPS3/val.txt
+val2: /home/xxx/Documents/YOLOMG/dataset/NPS3/val2.txt
+test: /home/xxx/Documents/YOLOMG/dataset/NPS3/test.txt
+test2: /home/xxx/Documents/YOLOMG/dataset/NPS3/test2.txt
+# Classes
+nc: 1  # number of classes
+names: ['UAV']  # class names
+
+
