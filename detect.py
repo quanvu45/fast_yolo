@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
-
+torch.backends.cudnn.benchmark = True
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]
 if str(ROOT) not in sys.path:
@@ -193,8 +193,8 @@ def run(
         im_np  = np.ascontiguousarray(img_rgb_batch)
         im2_np = np.ascontiguousarray(img_mask_batch)
 
-        im  = torch.from_numpy(im_np).to(device)
-        im2 = torch.from_numpy(im2_np).to(device)
+        im  = torch.from_numpy(im_np).to(device, non_blocking=True)
+        im2 = torch.from_numpy(im2_np).to(device, non_blocking=True)
 
         im  = im.half()  if half else im.float()
         im2 = im2.half() if half else im2.float()
@@ -204,7 +204,12 @@ def run(
         dt[0] += t2 - t1
 
         # 2. Inference
-        pred = model(im, im2, augment=augment, visualize=visualize)
+        # Thêm vào detect.py để profile
+        with torch.autograd.profiler.emit_nvtx():
+            # pred = model(im, im2)
+        # stream = torch.cuda.Stream()
+        # with torch.cuda.stream(stream):
+            pred = model(im, im2, augment=augment, visualize=visualize)
         t3 = time_sync()
         dt[1] += t3 - t2
 
