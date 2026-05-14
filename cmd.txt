@@ -2,3 +2,6 @@ source /home/ccne/Documents/YOLOMG/.venv/bin/activate
 
 python3 val.py --weights /home/ccne/Documents/YOLOMG/runs/train/ARD100_mask32-640_uavs/weights/best.engine --data /home/ccne/Documents/YOLOMG/data/ARD100_mask32.yaml --task val --conf-thres 0.177 --imgsz 640  --batch-size 8 --device
 python detect.py --source /home/ccne/Documents/YOLOMG/datasets/rgb/phantom02.txt --source2 /home/ccne/Documents/YOLOMG/datasets/mask/phantom02.txt
+
+
+python detect.py --source /home/ccne/Documents/YOLOMG/datasets/rgb/phantom144.txt --source2 /home/ccne/Documents/YOLOMG/datasets/mask/phantom56.txt --conf-thres 0.55 --imgsz 640 --device 0 --weights /home/ccne/Documents/YOLOMG/runs/train/ARD100_mask32-640_uavs/weights/best.engine --half --batch-size 8
