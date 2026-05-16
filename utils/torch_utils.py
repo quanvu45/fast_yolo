@@ -219,17 +219,16 @@ def model_info(model, verbose=False, img_size=640):
             print('%5g %40s %9s %12g %20s %10.3g %10.3g' %
                   (i, name, p.requires_grad, p.numel(), list(p.shape), p.mean(), p.std()))
 
-    #try:  # FLOPs
-    from thop import profile
-    stride = max(int(model.stride.max()), 32) if hasattr(model, 'stride') else 32
-    img = torch.zeros((1, model.yaml.get('ch', 3), stride, stride), device=next(model.parameters()).device)  # input
-    img2 = torch.zeros((1, model.yaml.get('ch', 3), stride, stride), device=next(model.parameters()).device)  # input
-    #THOP 估算PyTorch模型的FLOPs模块
-    flops = profile(deepcopy(model), inputs=(img,img2,), verbose=False)[0] / 1E9 * 2  # stride GFLOPs
-    img_size = img_size if isinstance(img_size, list) else [img_size, img_size]  # expand if int/float
-    fs = ', %.1f GFLOPs' % (flops * img_size[0] / stride * img_size[1] / stride)  # 640x640 GFLOPs
-    #except (ImportError, Exception):
-    #fs = ''
+    try:  # FLOPs
+        from thop import profile
+        stride = max(int(model.stride.max()), 32) if hasattr(model, 'stride') else 32
+        img = torch.zeros((1, model.yaml.get('ch', 3), stride, stride), device=next(model.parameters()).device)
+        img2 = torch.zeros((1, model.yaml.get('ch', 3), stride, stride), device=next(model.parameters()).device)
+        flops = profile(deepcopy(model), inputs=(img, img2,), verbose=False)[0] / 1E9 * 2  # stride GFLOPs
+        img_size = img_size if isinstance(img_size, list) else [img_size, img_size]
+        fs = ', %.1f GFLOPs' % (flops * img_size[0] / stride * img_size[1] / stride)
+    except (ImportError, Exception):
+        fs = ''
     LOGGER.info(f"Model Summary: {len(list(model.modules()))} layers, {n_p} parameters, {n_g} gradients{fs}")
 
 #根据ratio改变图像尺寸

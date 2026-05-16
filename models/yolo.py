@@ -110,7 +110,7 @@ class Model(nn.Module):
         self.inplace = self.yaml.get('inplace', True)
 
         # Build strides, anchors
-        m = self.model[-1]  # 读取Detect()
+        m = self.model[-1]  # 读取Detect() or v11Detect()
         if isinstance(m, Detect):
             s = 256  # 2x min stride
             m.inplace = self.inplace
@@ -121,6 +121,14 @@ class Model(nn.Module):
             check_anchor_order(m) #检查anchor顺序和stride顺序是否一致
             self.stride = m.stride
             self._initialize_biases()  # only run once
+        elif isinstance(m, v11Detect):
+            s = 256  # 2x min stride
+            # Run a dummy forward to compute strides from feature map sizes
+            m.stride = torch.tensor(
+                [s / x.shape[-2] for x in self._get_v11_feats(ch, ch2, s)]
+            )
+            self.stride = m.stride
+            m.bias_init()  # initialize biases
 
         # Init weights, biases 初始化
         initialize_weights(self)
@@ -259,15 +267,32 @@ class Model(nn.Module):
     def info(self, verbose=False, img_size=640):  # print model information
         model_info(self, verbose, img_size)
 
+    def _get_v11_feats(self, ch, ch2, s):
+        """Run a dummy forward to get feature maps for stride computation."""
+        with torch.no_grad():
+            out = self.forward(torch.zeros(1, ch, s, s), torch.zeros(1, ch2, s, s))
+            m = self.model[-1]
+            # During training forward, v11Detect returns a dict with 'feats'
+            if isinstance(out, dict) and 'feats' in out:
+                return out['feats']
+            elif isinstance(out, dict) and 'one2many' in out:
+                return out['one2many']['feats']
+            else:
+                raise RuntimeError("Cannot extract feats from v11Detect for stride computation")
+
     def _apply(self, fn):
         # Apply to(), cpu(), cuda(), half() to model tensors that are not parameters or registered buffers
         self = super()._apply(fn)
-        m = self.model[-1]  # Detect()
+        m = self.model[-1]  # Detect() or v11Detect()
         if isinstance(m, Detect):
             m.stride = fn(m.stride)
             m.grid = list(map(fn, m.grid))
             if isinstance(m.anchor_grid, list):
                 m.anchor_grid = list(map(fn, m.anchor_grid))
+        elif isinstance(m, v11Detect):
+            m.stride = fn(m.stride)
+            m.anchors = fn(m.anchors)
+            m.strides = fn(m.strides)
         return self
 
 #解析网络配置文件构建模型
