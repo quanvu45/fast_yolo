@@ -1,0 +1,66 @@
+Viewed opt.yaml:1-28
+
+Sụt từ 0.94 → 0.55 là quá lớn. Có vài nguyên nhân chính, để tôi kiểm tra:
+
+Listed directory val
+Listed directory exp9
+Viewed F1_curve.png
+Viewed F1_curve.png
+
+Rõ ràng rồi. Hãy xem val predictions vs labels để hiểu thêm:
+
+Viewed val_batch0_labels.jpg
+Viewed val_batch0_pred.jpg
+Viewed confusion_matrix.png
+
+Bây giờ tôi thấy rõ vấn đề. Nhìn confusion matrix:
+
+- **Recall chỉ 0.45** (chỉ detect được 45% drone thật)
+- **55% drone bị miss** (False Negative)
+- **FP = 1.0** — tất cả predict đều đúng class (precision cao nhưng miss nhiều)
+
+Đây **KHÔNG phải lỗi FP16/TensorRT**. Nguyên nhân chính:
+
+## Nguyên nhân sụt F1: 0.94 → 0.55
+
+### 🔴 Nguyên nhân #1: Sai resolution khi export TensorRT
+
+Nhìn vào 2 experiments:
+
+| | Training (F1=0.94) | Val exp9 (F1=0.55) |
+|---|---|---|
+| Model | `ARD100_mask32-640_uavs/best.pt` | `best.engine` (FP16) |
+| **Train imgsz** | **640** | Engine được build ở size nào? |
+
+Nếu bạn export `.engine` ở **size cố định** (ví dụ 640) nhưng val ở **size khác**, hoặc ngược lại — kết quả sẽ sai nghiêm trọng.
+
+### 🔴 Nguyên nhân #2: TensorRT engine batch size mismatch
+
+Engine build với batch cố định. Nếu build batch=1 nhưng val với `batch_size=8` → TensorRT sẽ pad/truncate sai.
+
+### 🔴 Nguyên nhân #3 (rất có thể): **Luồng mask bị sai khi dùng TensorRT**
+
+Nhìn confusion matrix: **55% drone bị miss hoàn toàn** — model "nhìn thấy" nhưng confidence rất thấp. Điều này xảy ra khi:
+
+- **Input mask (`images2`) bị truyền sai** vào TensorRT engine — binding order sai
+- **FP16 quantization** làm hỏng phần `SpatialAttention` (chia `weight1/weight2` — rất nhạy với precision thấp)
+
+### ✅ Cách kiểm tra & fix
+
+**Bước 1**: Val lại bằng `.pt` (FP32) để xác nhận model gốc vẫn tốt:
+```bash
+python val.py --weights runs/train/ARD100_mask32-640_uavs/weights/best.pt --imgsz 640 --batch-size 8
+```
+
+**Bước 2**: Nếu `.pt` vẫn ra ~0.94, thì vấn đề nằm ở **TensorRT export**. Export lại với:
+```bash
+python export.py --weights best.pt --imgsz 640 --batch-size 8 --half --include engine
+```
+Đảm bảo `--batch-size` khi export = batch-size khi val.
+
+**Bước 3**: Nếu vẫn sụt, thử export **FP32** (bỏ `--half`) để loại trừ lỗi precision:
+```bash
+python export.py --weights best.pt --imgsz 640 --batch-size 8 --include engine
+```
+
+> Theo kinh nghiệm, phép chia `weight1/weight2` trong `Concat3` line 129 rất nhạy với FP16 — khi `weight2` gần 0, FP16 sẽ overflow/NaN. Đây có thể là root cause chính.
