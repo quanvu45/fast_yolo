@@ -131,8 +131,8 @@ class GMC_VPI:
         h_orig, w_orig = frame_cur_gray.shape[:2]
 
         # 1. Resize to processing resolution
-        proc_w = 960 * self.scale
-        proc_h = 540 * self.scale
+        proc_w = int(960 * self.scale)
+        proc_h = int(540 * self.scale)
         prev_resized = cv2.resize(frame_prev_gray, (proc_w, proc_h), interpolation=cv2.INTER_CUBIC)
         cur_resized  = cv2.resize(frame_cur_gray,  (proc_w, proc_h), interpolation=cv2.INTER_CUBIC)
 
@@ -337,7 +337,7 @@ class GMC_CPU:
     Kept for comparison / systems without VPI.
     """
 
-    def __init__(self, scale=2, grid_w=64, grid_h=48, outlier_dist=50.0,
+    def __init__(self, scale=2, grid_w=128, grid_h=96, outlier_dist=50.0,
                  ransac_thresh=3.0, min_points=15):
         self.scale         = scale
         self.grid_w        = grid_w
@@ -355,8 +355,8 @@ class GMC_CPU:
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.003)
         )
 
-        proc_w = 960 * self.scale
-        proc_h = 540 * self.scale
+        proc_w = int(960 * self.scale)
+        proc_h = int(540 * self.scale)
         f1 = cv2.resize(frame_prev_gray, (proc_w, proc_h), interpolation=cv2.INTER_CUBIC)
         f2 = cv2.resize(frame_cur_gray,  (proc_w, proc_h), interpolation=cv2.INTER_CUBIC)
 
@@ -432,13 +432,19 @@ class GMC_CPU:
 
     def compute_fd5_mask(self, frame1_gray, frame2_gray, frame3_gray):
         """Same signature as GMC_VPI.compute_fd5_mask."""
-        comp1, mask1, _, _, _, _ = self.compute_mask(frame1_gray, frame2_gray)
-        diff1 = cv2.absdiff(frame2_gray, comp1)
+        f1 = cv2.GaussianBlur(frame1_gray, (11, 11), 0)
+        f2 = cv2.GaussianBlur(frame2_gray, (11, 11), 0)
+        f3 = cv2.GaussianBlur(frame3_gray, (11, 11), 0)
 
-        comp2, mask2, _, _, _, _ = self.compute_mask(frame3_gray, frame2_gray)
-        diff2 = cv2.absdiff(frame2_gray, comp2)
+        comp1, mask1, _, _, _, _ = self.compute_mask(f1, f2)
+        diff1 = cv2.absdiff(f2, comp1)
 
-        motion_diff = ((diff1.astype(np.float32) + diff2.astype(np.float32)) / 2.0).astype(np.uint8)
+        comp2, mask2, _, _, _, _ = self.compute_mask(f3, f2)
+        diff2 = cv2.absdiff(f2, comp2)
+
+        # REPLICATE FD5_mask.py OVERFLOW BUG:
+        # np.uint8 + np.uint8 overflows. (255+255=254)/2 = 127.
+        motion_diff = ((diff1 + diff2) / 2).astype(np.uint8)
         return motion_diff
 
 
@@ -446,7 +452,7 @@ class GMC_CPU:
 #  Factory – auto-select best backend
 # ══════════════════════════════════════════════════════════════
 
-def create_gmc(prefer_gpu=True, **kwargs):
+def create_gmc(prefer_gpu=True, silent=False, **kwargs):
     """
     Create the best available GMC engine.
 
@@ -455,6 +461,8 @@ def create_gmc(prefer_gpu=True, **kwargs):
     prefer_gpu : bool
         If True and VPI is available, use GMC_VPI (CUDA).
         Otherwise fall back to GMC_CPU.
+    silent : bool
+        If True, suppress print statements.
     **kwargs
         Forwarded to the constructor.
 
@@ -465,10 +473,13 @@ def create_gmc(prefer_gpu=True, **kwargs):
     if prefer_gpu and VPI_AVAILABLE:
         try:
             gmc = GMC_VPI(**kwargs)
-            print("[GMC] Using GPU-accelerated pipeline (NVIDIA VPI / CUDA)")
+            if not silent:
+                print("[GMC] Using GPU-accelerated pipeline (NVIDIA VPI / CUDA)")
             return gmc
         except Exception as e:
-            print(f"[GMC] VPI init failed ({e}), falling back to CPU")
+            if not silent:
+                print(f"[GMC] VPI init failed ({e}), falling back to CPU")
     gmc = GMC_CPU(**kwargs)
-    print("[GMC] Using CPU pipeline (OpenCV)")
+    if not silent:
+        print("[GMC] Using CPU pipeline (OpenCV)")
     return gmc
