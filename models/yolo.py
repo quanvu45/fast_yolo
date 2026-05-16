@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from models.common import *
 from models.experimental import *
+from models.head_v11 import v11Detect, DFL
 from utils.autoanchor import check_anchor_order
 from utils.general import LOGGER, check_version, check_yaml, make_divisible, print_args
 from utils.plots import feature_visualization, feature_visualization2
@@ -299,7 +300,7 @@ def parse_model(d, ch,ch2):  # model_dict, input_channels(3)
         
         if i < backbone1depth:
             if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv,
-                 BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, conv_bn_relu_maxpool, Shuffle_Block, CARAFE, Concat3]:
+                 BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, conv_bn_relu_maxpool, Shuffle_Block, CARAFE, Concat3, C3k2, C2PSA]:
                 c1, c2 = ch[f], args[0]
                 if c2 != no:  
                     c2 = make_divisible(c2 * gw, 8)  # 保证通道是8的倍数
@@ -309,12 +310,12 @@ def parse_model(d, ch,ch2):  # model_dict, input_channels(3)
         # depth gain 控制深度  如v5s: n*0.33   n: 当前模块的次数(间接控制深度)
         else:
             if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, MixConv2d, Focus, CrossConv,
-                     BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, conv_bn_relu_maxpool, Shuffle_Block, CBAM]:
+                     BottleneckCSP, C3, C3TR, C3SPP, C3Ghost, conv_bn_relu_maxpool, Shuffle_Block, CBAM, C3k2, C2PSA]:
                 c12, c22 = ch2[f], args[0] #保存输出
                 if c22 != no:  
                     c22 = make_divisible(c22 * gw, 8)  # 保证通道是8的倍数
                 args = [c12, c22, *args[1:]] 
-                if m in [BottleneckCSP, C3, C3TR, C3Ghost, CBAM]:
+                if m in [BottleneckCSP, C3, C3TR, C3Ghost, CBAM, C3k2, C2PSA]:
                     args.insert(2, n)   # 在第二个位置插入bottleneck个数n
                     n = 1  # 重置
             elif m is nn.BatchNorm2d:  # BN层只需要返回上一层的输出channel
@@ -341,6 +342,9 @@ def parse_model(d, ch,ch2):  # model_dict, input_channels(3)
                 args.append([ch2[x] for x in f])  # 在args中加入三个Detect层的输出channel
                 if isinstance(args[1], int):  # number of anchors
                     args[1] = [list(range(args[1] * 2))] * len(f)
+            elif m is v11Detect:
+                args.insert(0, nc) # nc
+                args.append([ch2[x] for x in f]) # ch
             elif m is Contract:
                 c22 = ch2[f] * args[0] ** 2
             elif m is Expand:
