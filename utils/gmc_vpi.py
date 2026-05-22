@@ -107,105 +107,101 @@ class GMC_VPI:
     # ──────────────────────────────────────────────────────────
 
     def compute_mask(self, frame_prev_gray, frame_cur_gray):
-        """
-        Compute a motion mask from two consecutive grayscale frames.
-
-        Parameters
-        ----------
-        frame_prev_gray : np.ndarray  (H, W) uint8
-        frame_cur_gray  : np.ndarray  (H, W) uint8
-
-        Returns
-        -------
-        compensated : np.ndarray (H, W) uint8
-            frame_prev warped into cur's coordinate system.
-        border_mask : np.ndarray (H, W) uint8
-            255 where warping produces invalid border, 0 elsewhere.
-        avg_dist    : float
-            Mean optical-flow displacement.
-        motion_x, motion_y : float
-            Mean translation components.
-        homo_matrix : np.ndarray (3, 3) float64
-            Estimated homography.
-        """
         h_orig, w_orig = frame_cur_gray.shape[:2]
-
-        # 1. Resize to processing resolution
         proc_w = int(960 * self.scale)
         proc_h = int(540 * self.scale)
-        prev_resized = cv2.resize(frame_prev_gray, (proc_w, proc_h), interpolation=cv2.INTER_CUBIC)
-        cur_resized  = cv2.resize(frame_cur_gray,  (proc_w, proc_h), interpolation=cv2.INTER_CUBIC)
 
-        # 2. Wrap as VPI images
-        vpi_prev = vpi.asimage(prev_resized)
-        vpi_cur  = vpi.asimage(cur_resized)
+        # 1. Load original frames directly to GPU
+        vpi_prev_orig = vpi.asimage(frame_prev_gray)
+        vpi_cur_orig  = vpi.asimage(frame_cur_gray)
 
-        # 3. Gaussian blur on GPU
         with self.backend:
+            # 2. Resize and Blur 100% on GPU (No more OpenCV resize!)
+            vpi_prev = vpi_prev_orig.rescale((proc_w, proc_h), interp=vpi.Interp.CUBIC)
+            vpi_cur  = vpi_cur_orig.rescale((proc_w, proc_h), interp=vpi.Interp.CUBIC)
+
             vpi_prev_blur = vpi_prev.gaussian_filter(self.blur_ksize, self.blur_sigma)
             vpi_cur_blur  = vpi_cur.gaussian_filter(self.blur_ksize, self.blur_sigma)
 
-        # 4. Generate grid keypoints (once, if resolution unchanged)
+        # 3. Generate grid keypoints (CPU once, then upload)
         self._ensure_grid(proc_w, proc_h)
 
-        # 5. Optical Flow – Pyramidal LK on GPU
+        # 4. Optical Flow – Pyramidal LK on GPU
         good_new, good_old, status = self._track_points(vpi_prev_blur, vpi_cur_blur)
 
-        # 6. Filter outliers & compute stats
+        # 5. Filter outliers (CPU)
         good_new_filt, good_old_filt, avg_dist, motion_x, motion_y = self._filter_outliers(
             good_new, good_old, status
         )
 
-        # 7. Estimate Homography (RANSAC) – CPU since VPI RANSAC is limited
+        # 6. Estimate Affine Partial 2D (Similarity Transform) - robust for UAVs
+        # Note: Kept on CPU via OpenCV because VPI's TransformEstimator only supports CPU backend anyway.
+        # This avoids the overhead of wrapping keypoints into vpi.Array.
         if len(good_old_filt) < self.min_points:
-            homo_matrix = np.array([[0.999, 0, 0], [0, 0.999, 0], [0, 0, 1]], dtype=np.float64)
+            affine_matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
         else:
-            homo_matrix, _ = cv2.findHomography(
-                good_new_filt, good_old_filt, cv2.RANSAC, self.ransac_thresh
+            affine_matrix, _ = cv2.estimateAffinePartial2D(
+                good_new_filt, good_old_filt, maxIters=200, ransacReprojThreshold=self.ransac_thresh
             )
-            if homo_matrix is None:
-                homo_matrix = np.eye(3, dtype=np.float64)
+            if affine_matrix is None:
+                affine_matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+                
+        # Create 3x3 matrix for interface compatibility and VPI perspwarp
+        homo_matrix = np.eye(3, dtype=np.float64)
+        homo_matrix[0:2, :] = affine_matrix
 
-        # 8. Warp prev frame using homography on GPU
-        vpi_prev_orig = vpi.asimage(frame_prev_gray)
-        # VPI perspwarp uses INVERSE mapping: output(x) = input(H^-1 * x)
-        # Our homography maps new→old, so we need inverse for VPI
         homo_inv = np.linalg.inv(homo_matrix).astype(np.float32)
 
-        with self.backend:
-            vpi_warped = vpi_prev_orig.perspwarp(homo_inv.tolist())
+        # 7. Warp and generate Border Mask 100% on GPU
+        # Trick: Warp a solid white image. Out-of-bounds pixels become black (0).
+        white_mask = np.full((h_orig, w_orig), 255, dtype=np.uint8)
+        vpi_white = vpi.asimage(white_mask)
 
-        # 9. Read back warped result
+        with self.backend:
+            # Warp the frame
+            vpi_warped = vpi_prev_orig.perspwarp(homo_inv.tolist(), border=vpi.Border.ZERO)
+            # Warp the white mask
+            vpi_warped_mask = vpi_white.perspwarp(homo_inv.tolist(), border=vpi.Border.ZERO)
+
+        # Cache VPI image for FD5 Absdiff without pulling to CPU RAM
+        self._last_vpi_warped = vpi_warped
+
+        # 8. Read back warped result to CPU (required for returning NumPy arrays)
         with vpi_warped.rlock_cpu() as warped_data:
             compensated = np.array(warped_data, copy=True)
-
-        # 10. Compute border mask from warped corners
-        border_mask = self._compute_border_mask(homo_matrix, w_orig, h_orig)
+            
+        with vpi_warped_mask.rlock_cpu() as mask_data:
+            # Invert the warped white image to get the border mask (No OpenCV Polylines needed!)
+            border_mask = 255 - np.array(mask_data, copy=True)
 
         return compensated, border_mask, avg_dist, motion_x, motion_y, homo_matrix
 
     def compute_fd5_mask(self, frame1_gray, frame2_gray, frame3_gray):
         """
-        Replicate FD5_mask logic: two-direction compensation + average diff.
-
-        Parameters
-        ----------
-        frame1_gray : np.ndarray (H, W) uint8 – oldest frame (t-2)
-        frame2_gray : np.ndarray (H, W) uint8 – middle frame  (t)
-        frame3_gray : np.ndarray (H, W) uint8 – newest frame  (t+2)
-
-        Returns
-        -------
-        motion_diff : np.ndarray (H, W) uint8
-            Averaged frame difference after bi-directional GMC.
+        Replicate FD5_mask logic: two-direction compensation + average diff (100% GPU VPI version).
         """
+        # Warp t-2 to t
         comp1, mask1, _, _, _, _ = self.compute_mask(frame1_gray, frame2_gray)
-        diff1 = cv2.absdiff(frame2_gray, comp1)
-
+        vpi_comp1 = self._last_vpi_warped  # Use cached VPI image on GPU
+        
+        # Warp t+2 to t
         comp2, mask2, _, _, _, _ = self.compute_mask(frame3_gray, frame2_gray)
-        diff2 = cv2.absdiff(frame2_gray, comp2)
+        vpi_comp2 = self._last_vpi_warped  # Use cached VPI image on GPU
 
-        motion_diff = ((diff1.astype(np.float32) + diff2.astype(np.float32)) / 2.0).astype(np.uint8)
+        vpi_f2 = vpi.asimage(frame2_gray)
+        
+        with self.backend:
+            # 100% GPU Absolute Difference
+            vpi_diff1 = vpi_f2.absdiff(vpi_comp1)
+            vpi_diff2 = vpi_f2.absdiff(vpi_comp2)
+
+        # Read back diffs to average on CPU 
+        # (VPI Python API lacks a simple add/divide function for images, so we average them in numpy quickly)
+        with vpi_diff1.rlock_cpu() as d1_data, vpi_diff2.rlock_cpu() as d2_data:
+            diff1 = np.array(d1_data, copy=False)
+            diff2 = np.array(d2_data, copy=False)
+            motion_diff = ((diff1.astype(np.float32) + diff2.astype(np.float32)) / 2.0).astype(np.uint8)
+
         return motion_diff
 
     # ──────────────────────────────────────────────────────────
@@ -402,16 +398,20 @@ class GMC_CPU:
         motion_y = float(np.mean(translate_y)) if translate_y else 0.0
 
         if len(pts_old_filt) < self.min_points:
-            homo_matrix = np.array([[0.999, 0, 0], [0, 0.999, 0], [0, 0, 1]], dtype=np.float64)
+            affine_matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
         else:
-            homo_matrix, _ = cv2.findHomography(
-                pts_new_filt, pts_old_filt, cv2.RANSAC, self.ransac_thresh
+            affine_matrix, _ = cv2.estimateAffinePartial2D(
+                pts_new_filt, pts_old_filt, maxIters=200, ransacReprojThreshold=self.ransac_thresh
             )
-            if homo_matrix is None:
-                homo_matrix = np.eye(3, dtype=np.float64)
+            if affine_matrix is None:
+                affine_matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
 
-        compensated = cv2.warpPerspective(
-            frame_prev_gray, homo_matrix, (w_orig, h_orig),
+        # Create 3x3 homography matrix for interface compatibility
+        homo_matrix = np.eye(3, dtype=np.float64)
+        homo_matrix[0:2, :] = affine_matrix
+
+        compensated = cv2.warpAffine(
+            frame_prev_gray, affine_matrix, (w_orig, h_orig),
             flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP
         )
 
