@@ -115,8 +115,8 @@ def bench_block_standalone(device, c=128, spatial=80, n=1, warmup=20, runs=100):
 
 
 def main():
-    device = select_device('cpu')
-    print(f"Device: CPU")
+    device = select_device('0' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
     print(f"PyTorch: {torch.__version__}")
     
     cfgs = {

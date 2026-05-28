@@ -15,7 +15,7 @@ CFG    = 'models/NPS_uav_s_v11.yaml'
 BS     = 2      # batch size
 IMG_SZ = 320    # smaller for speed
 NC     = 1      # number of classes (matches yaml)
-DEVICE = torch.device('cpu')
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 print("=" * 60)
 print("TEST 1: Model init + stride")
